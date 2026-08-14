@@ -219,9 +219,9 @@ Codex 不是寫完就停，而是把 server build 起來，再做 `/health` smok
 - 執行測試
 - 把結果推到 GitHub
 
-下一篇，我們會把 location event 的 latitude / longitude 真正交給 Vertex AI Google Maps Grounding，並處理英文回答、繁中轉譯、Google Maps attribution，以及實測後才發現的重複來源問題。
+下一篇，我們會把 location event 的 latitude / longitude 真正交給 Vertex AI Google Maps Grounding，並從 Gemini API key 路線改成 Vertex AI 與 ADC 認證。
 
-👉 **下一篇：讓 LINE Bot 真的看懂附近有什麼——用 Vertex AI Google Maps Grounding 找咖啡廳**
+👉 **下一篇：從 API Key 轉向 Vertex AI——讓 LINE Bot 用 Google Maps Grounding 找附近咖啡廳**
 
 ---
 

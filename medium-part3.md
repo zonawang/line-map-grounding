@@ -1,318 +1,139 @@
-# 明明顯示 200 OK，LINE Bot 為什麼不回話？一次真實的 Cloud Run 除錯紀錄
+# 五個 Maps 來源不等於五間店：繁中轉譯、來源卡片與 `placeId` 去重
 
-前兩篇，我和 Codex 完成了 LINE Location Action、Vertex AI Google Maps Grounding、繁中轉譯與來源卡片。
+上一篇，我和 Codex 已經讓 LINE Bot 把使用者的經緯度交給 Vertex AI Google Maps Grounding，成功取得附近咖啡廳的英文推薦與 Grounding metadata。
 
-本機測試已經成功，我原本以為接下來只要按下部署，收工。
+但模型「有回答」只是第一步。真正要交給 LINE 使用者時，還有三個產品問題：
 
-我原本以為這會是最簡單的一段，結果真正上線後，才遇到整個系列最值得記錄的問題：
+- Google Maps Grounding 使用英文，使用者想看繁體中文
+- 推薦必須附上可以點回 Google Maps 的來源
+- response 裡有 5 個來源，不代表真的有 5 間不同咖啡廳
 
-> Cloud Run health 正常、LINE Webhook Verify 也是 200，但使用者傳送位置後，聊天室完全沒反應。
-
-結果這段才是整個系列最像實戰的地方。這一篇會記錄 Codex 如何陪我登入 Google Cloud、辨認權限問題、部署服務，再從一堆「看起來都正常」的 logs 裡找到真正根因。
+這一篇要處理的，就是如何把 API response 變成使用者看得懂、點得到，而且不會重複的 LINE 訊息。
 
 ---
 
-## 🔐 登入成功了，但拿錯了工作證
+## 🌏 地圖先用英文查，最後再好好說中文
 
-Vertex AI 本機開發使用 Application Default Credentials，簡稱 ADC。先不用記這個長名字，可以把它想成：**讓本機程式拿到一張 Google Cloud 工作證。**
+Google Maps Grounding 文件要求 Grounded prompt 與 response 使用英文，但 LINE 使用者希望看到繁體中文。
 
-```bash
-gcloud auth application-default login
-```
-
-Codex 啟動登入流程，瀏覽器授權也成功，credentials 確實寫入本機。
-
-但第一次真實呼叫 Vertex AI，收到：
+所以 Codex 沒有硬逼第一次回答直接變中文，而是設計成兩階段：
 
 ```text
-Permission 'aiplatform.endpoints.predict' denied
+LINE 經緯度
+    ↓
+Vertex AI + Google Maps Grounding
+    ↓
+英文推薦 + Grounding metadata
+    ↓
+同一個 Vertex AI client 翻成繁中
+    ↓
+繁中摘要 + 原始 Maps URLs
 ```
 
-Codex 沒有立刻亂加 role，而是先查：
+翻譯 prompt 明確限制：
 
-```bash
-gcloud auth list
-gcloud config configurations list
-gcloud projects list
-```
+- 保留店名、數字與 caveat
+- 不新增事實
+- 不產生 URL
+- 只回傳翻譯內容
 
-結果發現目前登入帳號根本看不到任何 GCP project。
-
-問題不是「沒登入」，而是拿到另一個 Google 帳號的工作證。那個帳號雖然真實存在，卻沒有這個 project 的門禁權限。
-
-重新指定正確 project owner 帳號並同步 ADC 後：
-
-```bash
-gcloud auth login <project-owner-account> --update-adc
-```
-
-Codex 再檢查一次，確認：
-
-- active account 正確
-- project 正確
-- project 狀態為 ACTIVE
-- 帳號具有 Owner role
-- Vertex AI API 已啟用
-
-這段讓我重新理解兩個常被混在一起的概念：
-
-> Authentication 是警衛認得你；Authorization 是你的卡真的刷得進這一層樓。
-
----
-
-## 🧩 有工作證之後，還要告訴 Google「這次算哪個專案的」
-
-ADC 登入後，還要設定 quota project。白話來說，就是告訴 Google：這次 API 的用量與配額要記在哪個 project 名下。
-
-接著執行：
-
-```bash
-gcloud auth application-default set-quota-project your-project-id
-```
-
-又失敗了。
-
-錯誤裡出現 `testIamPermissions`，很像權限問題。但 Codex 往下讀完整 details，真正 reason 是：
-
-```text
-Cloud Resource Manager API has not been used or is disabled
-```
-
-所以解法不是繼續加 IAM，而是：
-
-```bash
-gcloud services enable cloudresourcemanager.googleapis.com
-```
-
-API 啟用後，Codex重新設定 quota project，再跑一次台北座標 Maps Grounding，成功取得繁中摘要與 Google Maps sources。
-
-我很喜歡 Codex 這次的除錯方式：
-
-1. 不只看錯誤第一行
-2. 找到結構化 reason
-3. 一次只修改一個假設
-4. 修改後立刻重跑最小驗證
-
----
-
-## ☁️ Cloud Run 也需要自己的「機器員工證」
-
-本機 ADC 成功後，下一步是正式環境。
-
-Cloud Run 上線後，不應該繼續借用我的個人登入。比較合理的做法，是替這個服務建立一位專用的「機器員工」，也就是 service account。
-
-Codex 建立專用 runtime service account：
-
-```text
-line-map-grounding@<project-id>.iam.gserviceaccount.com
-```
-
-並授予：
-
-- `roles/aiplatform.user`
-- `roles/serviceusage.serviceUsageConsumer`
-
-接著確認 Cloud Run、Cloud Build 與 Artifact Registry API，再進行部署：
-
-```bash
-gcloud run deploy line-map-grounding \
-  --source . \
-  --region asia-east1 \
-  --allow-unauthenticated \
-  --no-cpu-throttling \
-  --service-account line-map-grounding@<project-id>.iam.gserviceaccount.com \
-  --env-vars-file cloud-run-env.yaml
-```
-
-部署完成後，Codex 沒有只相信終端機的 `Done`，而是繼續驗證：
-
-- revision 已 serving 100% traffic
-- `/health` 回傳 200
-- runtime service account 正確
-- CPU throttling 設定正確
-- LINE webhook endpoint 更新成功
-- LINE 官方 webhook test 回傳 OK
-
-到這裡，health 是綠的、LINE Verify 也是綠的，我們都以為終於完成了。
-
----
-
-## 😶 所有燈號都是綠的，使用者卻只看到一片安靜
-
-手機實測時，位置成功送出，但聊天室沒有任何回答。
-
-Codex 先讀 Cloud Run request logs，看到：
-
-- LINE 確實呼叫 `POST /webhook`
-- request size 正常
-- user agent 是 LINE webhook
-- response status 是 200
-
-表面上沒有任何錯誤。這種問題比直接跳 500 更讓人困惑，因為系統像是在很有禮貌地告訴你：「我一切正常。」
-
-接著 Codex 把查詢縮小，只看該 revision 的 stdout / stderr，發現應用程式沒有 Grounding 開始、完成或 LINE reply 的 logs。
-
-再回頭讀 route，根因出現了：
+而 Google Maps URL 完全不經過第二個模型，而是直接從：
 
 ```typescript
-res.sendStatus(200);
-
-const results = await Promise.allSettled(
-  req.body.events.map(handleWebhookEvent)
-);
+candidate.groundingMetadata?.groundingChunks
 ```
 
-Webhook 一進來就先回覆「收到」，等於櫃台先把案件蓋上「已完成」章，才轉身開始處理真正的工作。
+取出。
 
-本機 Node.js 可能看起來還會跑，但在 Cloud Run 上，不能把 response 結束後的背景 Promise 當成可靠保證。
+這個分工很重要：模型負責翻譯文字，程式負責保留來源。URL 不需要經過模型重寫，也就不會在翻譯時被改壞或憑空補出來。
 
-這就是為什麼監控顯示漂亮的 200，使用者體感卻像 Bot 壞掉。
+Codex 也替翻譯加上備案：如果翻譯這一步失敗，至少先把原始英文回答保留下來，不要讓整個搜尋一起消失。
 
 ---
 
-## 💡 先讓使用者知道我們正在找，再把結果主動送回去
+## 🔗 AI 說了什麼，使用者應該能點回去確認
 
-Codex 將流程改成：
-
-1. 收到 location event
-2. 顯示 LINE Loading Animation
-3. 保持 Cloud Run request
-4. 等待 Vertex Maps Grounding 與翻譯
-5. 使用 Push Message 傳送結果
-6. 所有 event 完成後才回 HTTP 200
+每個 Maps chunk 可能包含：
 
 ```typescript
-await lineClient.showLoadingAnimation({
-  chatId: targetId,
-  loadingSeconds: 60
-});
-
-const result = await findNearbyCafes(latitude, longitude);
-
-await lineClient.pushMessage({
-  to: targetId,
-  messages: createCafeResultMessages(result)
-});
-
-res.sendStatus(200);
+chunk.maps?.title
+chunk.maps?.uri
+chunk.maps?.placeId
 ```
 
-為什麼 Codex 改用 Push Message？
+我們將來源做成 LINE Flex Message carousel：
 
-因為 Grounding 與翻譯需要時間。結果傳送與原始 reply token 解耦後，不需要把長時間任務綁死在 reply token 上。
+- 顯示咖啡廳名稱
+- 標示「資料來源：Google Maps」
+- 提供「在 Google Maps 查看」按鈕
+- 讓使用者自行確認營業時間、照片、評論與導航
 
-Loading Animation 也改善了使用者體驗。
+這讓推薦不再只是「AI 說的」，而是變成可以驗證的資訊。
 
-以前傳位置後畫面完全靜止；現在會先看到 Bot 正在處理，20～40 秒後再收到推薦卡片。
-
-Codex 修改後立刻執行：
-
-- TypeScript build
-- 單元測試
-- Cloud Run redeploy
-- health check
-- revision 檢查
-- Git commit 與 push
-
-修復不是停在本機，而是一路更新到線上版本。
+使用者不是只能相信 AI，而是可以直接回到來源。
 
 ---
 
-## 🔍 Logs 就像沿路留下腳印，不然只能猜 Bot 走到哪裡
+## 🧩 真實測試才發現：五張卡片裡，有三張可能是同一家店
 
-這次難查，是因為原本只有失敗會寫 logs。只要程式安靜地停在中間，我們就不知道它走到哪一步。
+TypeScript 編譯與單元測試都通過後，Codex 沒有停在假資料。
 
-Codex 加入：
+它用台北座標實際呼叫一次 Vertex Maps Grounding，只輸出摘要長度、來源數量與來源標題，不輸出敏感資料。
 
-- `Webhook event received`
-- `Cafe search started`
-- `Cafe search reply sent`
-- `Cafe search failed`
-- `webhookEventId`
-- `sourceCount`
-- `elapsedMs`
+結果確實拿到 5 個來源，但標題中出現：
+
+- 店家 Google Maps 頁面
+- `Review of ...` 評論頁
+- 同一店家的多個 review URLs
+
+原本程式只看網址是否相同。偏偏同一家店的店家頁、不同評論頁，本來就有不同網址，因此全部被當成不同店家。
+
+也就是說，來源數量和地點數量是兩回事。如果直接把每個 chunk 做成一張卡片，LINE carousel 看起來有很多推薦，實際上可能只是不斷重複同一家店。
+
+Codex 根據真實 response 修改策略：
+
+1. 優先使用 `placeId` 當唯一 key。
+2. 沒有 `placeId` 時，使用正規化店名。
+3. 移除 `Review of` 與 `- Google Maps`。
+4. 同一地點同時有店家頁與評論頁時，保留店家頁。
 
 ```typescript
-logger.info('Cafe search reply sent', {
-  webhookEventId: event.webhookEventId,
-  sourceCount: result.sources.length,
-  elapsedMs: Date.now() - startedAt
-});
+const key = maps.placeId || normalizedTitle || maps.uri;
+
+if (!existing || (existing.isReview && !isReview)) {
+  uniqueSources.set(key, {
+    title: normalizedTitle,
+    uri: maps.uri,
+    isReview
+  });
+}
 ```
 
-現在如果又有人說「Bot 沒反應」，我們可以直接判斷：
+接著 Codex 把這個真實案例補進單元測試，確認 review 先出現、店家頁後出現時，最後仍會保留店家頁。
 
-- LINE event 有沒有到
-- Maps Grounding 有沒有開始
-- 模型花了多久
-- 回了幾個來源
-- Push Message 是否成功
+這一段很能代表我喜歡的 AI 協作方式：Codex 不是宣布「測試通過」就收工，而是真的去看使用者最後會看到什麼。
 
-這比盯著一排 200 猜測有效太多。
-
----
-
-## 🧪 最後整理出的五層測試
-
-### 1. 程式層
-
-```bash
-npm run typecheck
-npm test
-```
-
-### 2. 本機服務
-
-```bash
-curl http://localhost:3000/health
-```
-
-### 3. Cloud Run
-
-```bash
-curl https://<service-url>/health
-```
-
-### 4. LINE Webhook Verify
-
-確認 endpoint、active status 與 test result。
-
-### 5. 手機 End-to-End
-
-1. 傳送「開始」
-2. 點擊「傳送目前位置」
-3. 確認 Loading Animation
-4. 等待繁中摘要與 Maps 卡片
-5. 對照 Cloud Logging 成功路徑
-
-Codex 這次最重要的提醒是：前四層全部成功，仍然不能取代最後真的拿手機用一次。
+> 不是只把文件範例寫進專案，而是用真實 API 回應驗證，發現產品問題，再把問題變成測試。
 
 ---
 
 ## 🏆 第三篇實戰總結
 
-這次從部署到修復，我不只是叫 Codex 提供指令，而是讓它直接參與整個閉環：
+這一篇把原始的 Maps Grounding response 整理成真正適合 LINE 使用者的輸出：
 
-- 啟動 Google 登入
-- 發現錯誤帳號
-- 驗證 project IAM
-- 啟用缺少的 API
-- 設定 ADC quota project
-- 建立 runtime service account
-- 部署 Cloud Run
-- 更新 LINE webhook
-- 讀 request logs 與 application logs
-- 從 200 response 找到非同步生命週期問題
-- 修改 Loading Animation 與 Push Message
-- 重新測試、部署、提交
+- 用英文完成 Maps Grounding，再用第二次 Vertex 呼叫翻成繁中
+- 翻譯失敗時保留原始英文回答
+- Maps URL 直接取自 Grounding metadata，不經模型改寫
+- 使用 Flex Message 顯示 Google Maps attribution
+- 以真實 response 發現評論來源重複
+- 用 `placeId`、正規化店名與來源優先順序去重
+- 把真實案例補進單元測試
 
-這次 Codex 的存在感不是只出現在文章最後的心得，而是散在每一個真實決定裡：看完整錯誤、切換帳號、驗證權限、部署、縮小 log 範圍、修改流程，再請我重新傳一次位置。
+此時本機功能已經能真正找到附近咖啡廳，並把可驗證、不重複的繁中推薦送進 LINE。
 
-**它真正有價值的地方，不只是會寫 code，而是能使用終端機、讀現況、驗證假設，陪我把線上問題一路查到使用者真的收到答案。**
+但下一篇才是最像正式產品的考驗：ADC 登入、IAM、quota project、Cloud Run runtime service account，以及「Webhook 明明回 200，使用者卻完全沒收到回答」。
 
-如果你也在做需要 LLM、外部搜尋、圖片分析或其他長時間任務的 LINE Bot，請記住今天這個問題：
-
-> 最難查的 Bug 往往不是 500，而是每個入口都顯示成功，使用者卻什麼都沒收到。
+👉 **下一篇：明明顯示 200 OK，LINE Bot 為什麼不回話？一次真實的 Cloud Run 除錯紀錄**
 
 ---
 
