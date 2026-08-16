@@ -37,26 +37,15 @@
 - 真實 response 中的 review URL 重複問題
 - 使用 `placeId` 與正規化店名去重
 
-## 第四篇：雲端部署與線上除錯
+## 第四篇：Loading Animation 與線上除錯
 
 👉 [`medium-part4.md`](./medium-part4.md)
 
-**明明顯示 200 OK，LINE Bot 為什麼不回話？一次真實的 Cloud Run 除錯紀錄**
-
-- 登入成功但 Vertex AI 仍然 403
-- quota project 與 Cloud Resource Manager API
-- Cloud Run runtime service account
-- Webhook 200 但背景 Promise 沒有可靠完成
-- Loading Animation、Push Message 與 Cloud Logging
-
-## 專題篇：Loading Animation 與長時間任務
-
-👉 [`medium-loading-animation.md`](./medium-loading-animation.md)
-
-**LINE Bot 查地圖要等 30 秒，怎麼讓使用者不焦慮？我用 Codex 加上 Loading Animation 與 Push Message**
+**LINE Bot 查地圖要等 30 秒：Loading Animation 背後，還藏著 Webhook 200 的陷阱**
 
 - 為什麼「沒有反應」比「慢」更糟
 - `showLoadingAnimation` 與不同聊天室 target ID
 - 動畫失敗不影響主要搜尋
-- Webhook response lifecycle
+- Webhook 200 但背景 Promise 沒有可靠完成
 - Push Message、結構化 logs 與 webhook 重試
+- ADC、quota project 與 Cloud Run service account

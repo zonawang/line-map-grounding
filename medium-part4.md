@@ -1,202 +1,168 @@
-# 明明顯示 200 OK，LINE Bot 為什麼不回話？一次真實的 Cloud Run 除錯紀錄
+# LINE Bot 查地圖要等 30 秒：Loading Animation 背後，還藏著 Webhook 200 的陷阱
 
-前三篇，我和 Codex 完成了 LINE Location Action、Vertex AI Google Maps Grounding、繁中轉譯、來源卡片與重複地點處理。
+前三篇，我和 Codex 已經完成 LINE Location Action、Vertex AI Google Maps Grounding、繁中轉譯與來源卡片。
 
-程式在本機已經能跑，我心裡想的其實很簡單：接下來應該只剩部署了吧？
+本機測試也成功了。我原本以為接下來只要部署到 Cloud Run，這個系列就可以漂亮收尾。
 
-沒想到，真正花時間的部分才正要開始。
+結果真正拿起手機測試時，位置送出去，聊天室卻安靜了二三十秒。
 
-> Cloud Run health 正常、LINE Webhook Verify 也是 200，但使用者傳送位置後，聊天室完全沒反應。
+沒有錯誤、沒有回覆，也沒有任何「正在處理」的提示。
 
-最麻煩的不是看到一個大大的紅色錯誤，而是每個地方看起來都正常，Bot 卻像已讀不回。
+身為開發者，我知道後端可能正在查 Google Maps、整理來源和翻譯；但使用者看不到這些。他只會懷疑 Bot 是不是壞了，然後重按、重傳，或直接離開。
 
-這篇想記錄的，就是我和 Codex 怎麼從 Google Cloud 登入、權限與部署一路查到程式本身，最後在一排漂亮的 `200 OK` 背後找到真正原因。
+所以這篇最後要解決的，不只是怎麼顯示一個 Loading Animation，而是：
+
+> 當 AI 任務需要時間，怎麼讓使用者知道系統還在工作，也讓後端真的可靠地把工作做完？
 
 ---
 
-## 🔐 明明登入成功，為什麼還是沒有權限？
+## ☁️ 上線前，先讓 Cloud Run 拿到正確身分
 
-要讓本機程式呼叫 Vertex AI，Google Cloud 需要先知道「現在是誰在操作」。這裡用的是 Application Default Credentials，簡稱 ADC。可以先把它想成一張給本機程式使用的 Google Cloud 工作證。
+在看到動畫之前，我們先遇到一段 Google Cloud 的登入與權限插曲。
 
-```bash
-gcloud auth application-default login
-```
-
-登入頁正常開啟、瀏覽器也顯示授權成功，credentials 確實寫進了電腦。照理說應該可以用了。
-
-結果第一次真的呼叫 Vertex AI，就被擋下來：
+本機呼叫 Vertex AI 使用 ADC，也就是給本機程式使用的 Google Cloud 工作證。登入雖然成功，第一次呼叫卻收到：
 
 ```text
 Permission 'aiplatform.endpoints.predict' denied
 ```
 
-我第一個反應是：「是不是還少了某個 IAM role？」但 Codex 先沒有動權限，而是把目前登入狀態攤開來看：
+一查才發現，我登入的是另一個看不到這個 project 的 Google 帳號。換成正確帳號後，又因為 Cloud Resource Manager API 尚未啟用，無法設定 quota project。
 
-```bash
-gcloud auth list
-gcloud config configurations list
-gcloud projects list
-```
-
-一查才發現，現在登入的帳號根本看不到這個 GCP project。
-
-所以問題不是「沒有登入」，而是「登入了錯的帳號」。那個 Google 帳號是真的，工作證也是真的，只是它沒有這個 project 的門禁權限。
-
-重新指定正確 project owner 帳號並同步 ADC 後：
-
-```bash
-gcloud auth login <project-owner-account> --update-adc
-```
-
-換成正確帳號後，我們再確認 active account、project、IAM role 與 Vertex AI API 都正確，才繼續往下走。
-
-這次我才真的分清楚兩個很容易混在一起的概念：
-
-> Authentication 是警衛認得你；Authorization 是你的卡真的刷得進這一層樓。
-
----
-
-## 🧩 有了工作證，還要說明帳要算在哪個專案
-
-帳號正確後，還要設定 quota project。白話來說，就是告訴 Google：「接下來這些 API 用量與配額，要算在哪個 project 名下？」
-
-接著執行：
-
-```bash
-gcloud auth application-default set-quota-project your-project-id
-```
-
-然後，它又失敗了。
-
-錯誤訊息裡出現 `testIamPermissions`，第一眼又很像權限不夠。但 Codex 把完整 details 往下讀，真正重要的是這一行：
-
-```text
-Cloud Resource Manager API has not been used or is disabled
-```
-
-原來不是 role 不夠，而是 Cloud Resource Manager API 根本還沒啟用。真正需要做的是：
-
-```bash
-gcloud services enable cloudresourcemanager.googleapis.com
-```
-
-API 啟用後，我們重新設定 quota project，再用台北座標跑一次 Maps Grounding。這次終於成功拿到繁中摘要與 Google Maps 來源。
-
-這段除錯讓我很有感。錯誤訊息第一行常常只是表面症狀，真正可採取行動的原因可能藏在後面的 details 裡。比起一次亂改很多設定，更有效的方式是找到結構化 reason、一次驗證一個假設，再立刻重跑最小測試。
-
----
-
-## ☁️ 本機用我的帳號，Cloud Run 上線後要用誰的？
-
-本機終於能呼叫 Vertex AI，接下來才輪到 Cloud Run。
-
-在自己的電腦上，我可以用個人帳號登入；但服務部署到雲端後，總不能一直借用我的個人身分。Cloud Run 也需要一個自己的身分，這就是 service account。
-
-如果把 Cloud Run 想成一位正式上工的機器員工，service account 就是它的員工證。它只拿工作需要的權限，不需要擁有整個 project。
-
-我們替這個服務建立了專用帳號：
-
-```text
-line-map-grounding@<project-id>.iam.gserviceaccount.com
-```
-
-它只需要兩個角色：
+這兩個問題修好後，本機才真正能呼叫 Vertex AI。到了 Cloud Run，我們則替服務建立專用的 runtime service account，並只給它工作需要的角色：
 
 - `roles/aiplatform.user`
 - `roles/serviceusage.serviceUsageConsumer`
 
-確認 Cloud Run、Cloud Build 與 Artifact Registry 等必要 API 都已啟用後，才正式部署：
+這段最重要的提醒是：登入成功，不代表帳號正確；部署成功，也不代表服務拿到了正確權限。
 
-```bash
-gcloud run deploy line-map-grounding \
-  --source . \
-  --region asia-east1 \
-  --allow-unauthenticated \
-  --no-cpu-throttling \
-  --service-account line-map-grounding@<project-id>.iam.gserviceaccount.com \
-  --env-vars-file cloud-run-env.yaml
-```
-
-終端機最後顯示 `Done`，但「部署指令跑完」和「產品真的能用」是兩回事。我們接著確認 revision 已接收流量、runtime service account 正確、`/health` 回 200，LINE 官方的 Webhook Verify 也顯示成功。
-
-看到這裡，我真的以為完成了。
+處理完這些身分問題，Cloud Run 的 `/health` 回 200，LINE 官方的 Webhook Verify 也顯示成功。所有燈號都是綠的，我真的以為完成了。
 
 ---
 
-## 😶 所有燈號都是綠的，Bot 卻像已讀不回
+## 😶 最大的問題不是慢，而是「不知道發生什麼事」
 
-我拿起手機傳送位置。位置訊息成功送出，接著等了幾秒、十幾秒，聊天室仍然一片安靜。
+Google Maps Grounding 不是回傳一句固定文字。使用者送出位置後，後端要完成：
 
-沒有錯誤訊息，沒有推薦卡片，也沒有任何「正在處理」的提示。
+1. 接收 LINE location event
+2. 將經緯度傳給 Vertex AI
+3. 等待 Google Maps Grounding
+4. 整理店家與來源
+5. 將英文回答翻成繁體中文
+6. 組成 LINE Flex Message
+7. 把結果送回聊天室
 
-Codex 先從 Cloud Run 的 request logs 看起，結果每一項都很正常：
+整個流程可能需要 20～40 秒。
 
-- LINE 確實呼叫 `POST /webhook`
-- request size 正常
-- user agent 是 LINE webhook
-- response status 是 200
+如果畫面有明確的「正在處理」，30 秒還可以理解；但畫面完全靜止時，5 秒就足以讓人懷疑剛才是不是沒有按成功。
 
-如果只看 HTTP 狀態，這次請求甚至可以算是成功。這種問題反而比直接跳 500 更難查，因為系統很有禮貌地告訴你：「我都處理好了。」但使用者明明什麼都沒收到。
+Codex 讀完目前的 handler 後，先提出最直接的改善：使用 LINE 官方的 `showLoadingAnimation`。
 
-接著，我們把範圍縮小，只看這個 revision 的應用程式輸出。奇怪的是，裡面沒有 Maps Grounding 開始、完成，也沒有 LINE 回覆成功的紀錄。
-
-這代表 LINE 的請求確實到了，但真正的搜尋流程可能根本沒有可靠地跑完。再回頭看 webhook route，終於找到可疑的順序：
-
-```typescript
-res.sendStatus(200);
-
-const results = await Promise.allSettled(
-  req.body.events.map(handleWebhookEvent)
-);
-```
-
-程式一收到 webhook，就先送出 HTTP 200，然後才開始處理每個 event。
-
-這就像櫃台一拿到申請單，還沒辦理就先蓋上「已完成」的章。對 LINE 來說，這次 webhook 已經成功；但真正要查地圖、翻譯和回傳訊息的工作，其實才剛開始。
-
-在本機測試時，Node.js process 還在，response 結束後的 Promise 可能照樣跑完，所以這個問題不一定會立刻出現。但到了 Cloud Run，HTTP response 結束之後的背景工作不能被當成可靠保證。
-
-那個漂亮的 200，只能證明 webhook endpoint 有回應，不能證明咖啡廳搜尋和 LINE 訊息都完成了。
+白話來說，就是讓 Bot 先表現出「我收到位置了，現在正在找」。
 
 ---
 
-## 💡 不要先說「完成」，而是讓整個工作真的做完
+## ⏳ Loading Animation 的程式其實很短
 
-找到問題後，我們不再提早結束 request：先顯示 Loading Animation，等待 Maps Grounding 與翻譯完成，用 Push Message 傳回結果，最後才回 HTTP 200。
+真正呼叫動畫只需要：
 
 ```typescript
 await lineClient.showLoadingAnimation({
   chatId: targetId,
   loadingSeconds: 60
 });
+```
 
-const result = await findNearbyCafes(latitude, longitude);
+`chatId` 是要顯示動畫的聊天室；`loadingSeconds` 則是動畫最多持續多久。
 
-await lineClient.pushMessage({
-  to: targetId,
-  messages: createCafeResultMessages(result)
-});
+LINE event 可能來自一對一聊天、群組或聊天室，所以 Codex 先用 helper 統一取得 `userId`、`groupId` 或 `roomId`，後面的動畫與推送都共用同一個 `targetId`。
+
+但 Loading Animation 只是體驗加分，不是主要功能。如果動畫 API 暫時失敗，咖啡廳搜尋仍然應該繼續。
+
+```typescript
+if (targetId) {
+  try {
+    await lineClient.showLoadingAnimation({
+      chatId: targetId,
+      loadingSeconds: 60
+    });
+  } catch (error) {
+    logger.error('Loading animation failed', {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+```
+
+這很像餐廳的叫號螢幕壞了。螢幕壞掉當然不理想，但廚房不應該因此停止做餐。
+
+---
+
+## ⚠️ 只加動畫還不夠，真正的問題藏在 Webhook 生命週期
+
+第一次上線時，LINE webhook request 是 200，Cloud Run health 也正常，使用者卻完全收不到結果。
+
+Codex 往 application logs 裡看，沒有找到 Maps Grounding 開始、完成或訊息送出的紀錄。再回頭讀 webhook route，終於看到可疑的順序：
+
+```typescript
+res.sendStatus(200);
+
+await Promise.allSettled(
+  req.body.events.map(handleWebhookEvent)
+);
+```
+
+程式一收到 webhook，就先回覆 HTTP 200，然後才在背景處理 event。
+
+這就像櫃台拿到申請單，還沒辦理就先蓋上「已完成」的章。對 LINE 來說，這次 webhook 已經成功；但真正要查地圖、翻譯和傳送訊息的工作，其實才剛開始。
+
+在本機，Node.js process 還在，response 結束後的 Promise 可能照樣跑完；但到了 Cloud Run，不能把 response 結束後的背景工作當成可靠保證。
+
+最後我們把順序反過來：
+
+```typescript
+await Promise.allSettled(
+  req.body.events.map(handleWebhookEvent)
+);
 
 res.sendStatus(200);
 ```
 
-這裡同時做了兩個重要調整。
+Loading Animation 解決的是「使用者不知道正在等什麼」；保持 request 則是確保「後端真的把工作做完」。兩件事缺一不可。
 
-第一個是把結果改用 Push Message 傳送。Maps Grounding 加上翻譯需要一點時間，將結果傳送與原始 reply token 解耦後，就不需要讓長時間任務一直綁著 reply token。
+---
 
-第二個是先顯示 Loading Animation。
+## 📤 為什麼結果改用 Push Message？
 
-這不會讓模型真的變快，但會讓等待變得可以理解。以前傳完位置後，使用者只看到一片安靜；現在至少會先知道 Bot 正在找，通常再等 20～40 秒，就會收到推薦卡片。
+Maps Grounding 加上翻譯需要時間。如果一直等到最後才使用最初的 reply token，流程會更依賴 token 的有效時間。
 
-修改後，我們重新執行 build 與測試、部署到 Cloud Run，再拿手機走一次完整流程。看到 Loading Animation 出現、接著真的收到咖啡廳卡片時，才算修好。
+所以 Codex 將搜尋結果改成 Push Message：
+
+```typescript
+const result = await findNearbyCafes(latitude, longitude);
+const messages = createCafeResultMessages(result);
+
+await lineClient.pushMessage({
+  to: targetId,
+  messages
+});
+```
+
+最後的使用體驗變成：
+
+1. 使用者傳送位置
+2. LINE 顯示 Loading Animation
+3. 後端查詢 Vertex AI 與 Google Maps
+4. Bot 主動推送繁中摘要與來源卡片
+
+動畫不會讓模型變快，但它讓等待變得可以理解；Push Message 則讓長時間任務不需要綁死在原始 reply token 上。
 
 ---
 
 ## 🔍 只記錯誤還不夠，成功路徑也要留下腳印
 
-這次會查這麼久，另一個原因是原本幾乎只有失敗時才寫 log。如果程式沒有丟出明顯錯誤，只是安靜地停在某個步驟，我們就很難知道它最後走到哪裡。
+第一次沒回覆時，我們只看到 request 200，卻不知道搜尋究竟走到哪裡。
 
-所以我們替 webhook 收到事件、搜尋開始、訊息送出與失敗等關鍵節點留下紀錄，並附上 `webhookEventId`、來源數量與處理時間。
+所以 Codex 在 webhook 收到事件、搜尋開始、訊息送出與失敗等關鍵節點加入 log，並記下 `webhookEventId`、來源數量與處理時間。
 
 ```typescript
 logger.info('Cafe search reply sent', {
@@ -206,45 +172,45 @@ logger.info('Cafe search reply sent', {
 });
 ```
 
-這些 log 不是為了把 Cloud Logging 填滿，而是讓我們沿著同一個 `webhookEventId` 看出事件有沒有抵達、搜尋花了多久，以及 Push Message 是否成功。這比盯著一排 200 猜測有效太多。
+現在只要沿著同一個 `webhookEventId` 往下看，就能知道 event 有沒有抵達、搜尋花了多久，以及 Push Message 是否成功。
+
+Logs 就像沿路留下的腳印。沒有腳印時，只知道旅客沒到終點；有了腳印，才知道他停在哪一站。
 
 ---
 
-## 🧪 到底怎樣才算「真的好了」？
+## 🧪 最後一定要拿手機走一次完整流程
 
-Part 1 已經做過 typecheck、單元測試、本機啟動與 `/health` smoke test。部署後，我們也再次確認 Cloud Run 的 `/health` 正常。這些檢查很重要，但這次的經驗證明：它們只能告訴我們程式和服務「有活著」，不能證明 LINE 使用者真的收得到結果。
+Typecheck、單元測試、`/health` 與 Webhook Verify 都很重要，但它們只能證明各個零件看起來正常，不能證明使用者真的收到結果。
 
-最後還有兩關。
-
-### LINE 找不找得到 webhook？
-
-先用 LINE 官方的 Webhook Verify，確認 endpoint、active status 與 test result 都正常。這可以證明 LINE 能把請求送到 Cloud Run，但仍然不能證明後面的搜尋與訊息發送有完成。
-
-### 真正的使用者收不收得到結果？
-
-最後拿手機走一次完整流程：
+最後我拿手機重新測試：
 
 1. 傳送「開始」
 2. 點擊「傳送目前位置」
-3. 確認 Loading Animation
+3. 確認 Loading Animation 出現
 4. 等待繁中摘要與 Maps 卡片
 5. 對照 Cloud Logging 的成功路徑
 
-只有最後這一關通過，才代表 Bot 對使用者來說真的修好了。
+看到動畫出現，接著真的收到咖啡廳卡片，這次才算修好。
+
+正式產品還需要再處理 webhook retry。如果 LINE 因等待時間較長而重送 event，後端應使用 `webhookEventId` 去重，或把長時間工作交給 Cloud Tasks，避免重複查詢與推送。
+
+這次 MVP 先把下一步清楚留下，沒有假裝所有可靠性問題都已經消失。
 
 ---
 
 ## 🏆 第四篇實戰總結
 
-這次從登入、權限、部署到 webhook 除錯，Codex 做的不只是提供幾條指令，而是跟著問題一路往下查：先確認眼前的錯誤究竟發生在哪一層，再修改、驗證，直到手機真的收到結果。
+Loading Animation 的 code 只有幾行，但它背後其實連著三個不同問題：
 
-回頭看，真正花時間的不是某一行 TypeScript，而是在每個看似合理的地方繼續問：「這真的能證明下一步也成功嗎？」
+- **使用者體驗**：等待時，要讓使用者知道 Bot 正在工作
+- **Webhook lifecycle**：不能先結束 response，再期待背景任務一定完成
+- **結果傳送方式**：長時間任務適合用 Push Message 與 reply token 解耦
 
-登入成功，不代表帳號正確；帳號正確，不代表 API 已啟用；部署成功，不代表 webhook 後面的工作有完成；HTTP 200，更不代表使用者收到訊息。
+這次 Codex 不只是替聊天視窗加上一個會動的圖示。它從 Cloud Run logs 找到 `200 OK` 背後的真正問題，再一起修改 request 順序、Push Message、錯誤處理與成功 logs，最後重新部署，請我用手機再測一次。
 
-**Codex 真正幫上忙的地方，不只是改 code，而是能讀取當下狀態、驗證假設，再陪我把問題一路追到使用者真的收到答案。**
+回頭看，真正讓體驗變好的不是動畫本身，而是整條等待流程終於對使用者與開發者都變得清楚。
 
-如果你也在做需要 LLM、外部搜尋、圖片分析或其他長時間任務的 LINE Bot，請記住今天這個問題：
+如果你也在做需要 LLM、外部搜尋、圖片分析或其他長時間任務的 LINE Bot，請記住：
 
 > 最難查的 Bug 往往不是 500，而是每個入口都顯示成功，使用者卻什麼都沒收到。
 

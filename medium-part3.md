@@ -131,9 +131,9 @@ if (!existing || (existing.isReview && !isReview)) {
 
 此時本機功能已經能真正找到附近咖啡廳，並把可驗證、不重複的繁中推薦送進 LINE。
 
-但下一篇才是最像正式產品的考驗：ADC 登入、IAM、quota project、Cloud Run runtime service account，以及「Webhook 明明回 200，使用者卻完全沒收到回答」。
+但下一篇才是最像正式產品的考驗：Bot 查地圖要等二三十秒，怎麼讓使用者知道它還在工作？而 Cloud Run 明明回了 200，為什麼聊天室仍然什麼都沒收到？
 
-👉 **下一篇：明明顯示 200 OK，LINE Bot 為什麼不回話？一次真實的 Cloud Run 除錯紀錄**
+👉 **下一篇：LINE Bot 查地圖要等 30 秒——Loading Animation 背後，還藏著 Webhook 200 的陷阱**
 
 ---
 
