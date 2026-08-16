@@ -264,40 +264,25 @@ logger.info('Cafe search reply sent', {
 
 ## 🧪 到底怎樣才算「真的好了」？
 
-這次之後，我把驗證分成五層。每一層回答的其實是不同問題。
+Part 1 已經做過 typecheck、單元測試、本機啟動與 `/health` smoke test。部署後，我們也再次確認 Cloud Run 的 `/health` 正常。這些檢查很重要，但這次的經驗證明：它們只能告訴我們程式和服務「有活著」，不能證明 LINE 使用者真的收得到結果。
 
-### 1. 程式本身能不能通過檢查？
+最後還有兩關。
 
-```bash
-npm run typecheck
-npm test
-```
+### LINE 找不找得到 webhook？
 
-### 2. 本機 server 能不能正常啟動？
+先用 LINE 官方的 Webhook Verify，確認 endpoint、active status 與 test result 都正常。這可以證明 LINE 能把請求送到 Cloud Run，但仍然不能證明後面的搜尋與訊息發送有完成。
 
-```bash
-curl http://localhost:3000/health
-```
+### 真正的使用者收不收得到結果？
 
-### 3. 部署後的 Cloud Run 有沒有活著？
-
-```bash
-curl https://<service-url>/health
-```
-
-### 4. LINE 找不找得到 webhook？
-
-確認 endpoint、active status 與 test result。
-
-### 5. 真正的使用者收不收得到結果？
+最後拿手機走一次完整流程：
 
 1. 傳送「開始」
 2. 點擊「傳送目前位置」
 3. 確認 Loading Animation
 4. 等待繁中摘要與 Maps 卡片
-5. 對照 Cloud Logging 成功路徑
+5. 對照 Cloud Logging 的成功路徑
 
-這五層不能互相取代。尤其是前四層全部成功，也只能證明各個零件看起來正常，不能取代最後真的拿手機走一次完整流程。
+只有最後這一關通過，才代表 Bot 對使用者來說真的修好了。
 
 ---
 
