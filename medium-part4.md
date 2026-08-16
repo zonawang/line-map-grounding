@@ -48,13 +48,7 @@ gcloud projects list
 gcloud auth login <project-owner-account> --update-adc
 ```
 
-換成正確帳號後，我們沒有立刻往下衝，而是再確認幾件事：
-
-- active account 正確
-- project 正確
-- project 狀態為 ACTIVE
-- 帳號具有 Owner role
-- Vertex AI API 已啟用
+換成正確帳號後，我們再確認 active account、project、IAM role 與 Vertex AI API 都正確，才繼續往下走。
 
 這次我才真的分清楚兩個很容易混在一起的概念：
 
@@ -88,12 +82,7 @@ gcloud services enable cloudresourcemanager.googleapis.com
 
 API 啟用後，我們重新設定 quota project，再用台北座標跑一次 Maps Grounding。這次終於成功拿到繁中摘要與 Google Maps 來源。
 
-這段除錯讓我很有感。錯誤訊息第一行常常只是「表面症狀」，真正可採取行動的原因可能藏在後面的 details 裡。這次 Codex 的做法其實很樸素：
-
-1. 不只看錯誤第一行
-2. 找到結構化 reason
-3. 一次只驗證一個假設
-4. 修改後立刻重跑最小驗證
+這段除錯讓我很有感。錯誤訊息第一行常常只是表面症狀，真正可採取行動的原因可能藏在後面的 details 裡。比起一次亂改很多設定，更有效的方式是找到結構化 reason、一次驗證一個假設，再立刻重跑最小測試。
 
 ---
 
@@ -128,16 +117,7 @@ gcloud run deploy line-map-grounding \
   --env-vars-file cloud-run-env.yaml
 ```
 
-終端機最後顯示 `Done`，但「部署指令跑完」和「產品真的能用」是兩回事。我們接著檢查：
-
-- revision 已 serving 100% traffic
-- `/health` 回傳 200
-- runtime service account 正確
-- CPU throttling 設定正確
-- LINE webhook endpoint 更新成功
-- LINE 官方 webhook test 回傳 OK
-
-revision 正常接流量、`/health` 回 200，LINE 官方的 Webhook Verify 也顯示成功。
+終端機最後顯示 `Done`，但「部署指令跑完」和「產品真的能用」是兩回事。我們接著確認 revision 已接收流量、runtime service account 正確、`/health` 回 200，LINE 官方的 Webhook Verify 也顯示成功。
 
 看到這裡，我真的以為完成了。
 
@@ -182,14 +162,7 @@ const results = await Promise.allSettled(
 
 ## 💡 不要先說「完成」，而是讓整個工作真的做完
 
-找到問題後，流程改成：
-
-1. 收到 location event
-2. 顯示 LINE Loading Animation
-3. 保持 Cloud Run request
-4. 等待 Vertex Maps Grounding 與翻譯
-5. 使用 Push Message 傳送結果
-6. 確認所有 event 都處理完成，再回 HTTP 200
+找到問題後，我們不再提早結束 request：先顯示 Loading Animation，等待 Maps Grounding 與翻譯完成，用 Push Message 傳回結果，最後才回 HTTP 200。
 
 ```typescript
 await lineClient.showLoadingAnimation({
@@ -215,16 +188,7 @@ res.sendStatus(200);
 
 這不會讓模型真的變快，但會讓等待變得可以理解。以前傳完位置後，使用者只看到一片安靜；現在至少會先知道 Bot 正在找，通常再等 20～40 秒，就會收到推薦卡片。
 
-修改後，我們重新走了一次完整流程：
-
-- TypeScript build
-- 單元測試
-- Cloud Run redeploy
-- health check
-- revision 檢查
-- Git commit 與 push
-
-這次沒有因為本機測試通過就停下來，而是一路更新到 Cloud Run，再拿手機重新測試。看到 Loading Animation 出現、接著真的收到咖啡廳卡片時，才算修好。
+修改後，我們重新執行 build 與測試、部署到 Cloud Run，再拿手機走一次完整流程。看到 Loading Animation 出現、接著真的收到咖啡廳卡片時，才算修好。
 
 ---
 
@@ -232,15 +196,7 @@ res.sendStatus(200);
 
 這次會查這麼久，另一個原因是原本幾乎只有失敗時才寫 log。如果程式沒有丟出明顯錯誤，只是安靜地停在某個步驟，我們就很難知道它最後走到哪裡。
 
-所以我們替幾個關鍵節點留下紀錄：
-
-- `Webhook event received`
-- `Cafe search started`
-- `Cafe search reply sent`
-- `Cafe search failed`
-- `webhookEventId`
-- `sourceCount`
-- `elapsedMs`
+所以我們替 webhook 收到事件、搜尋開始、訊息送出與失敗等關鍵節點留下紀錄，並附上 `webhookEventId`、來源數量與處理時間。
 
 ```typescript
 logger.info('Cafe search reply sent', {
@@ -250,15 +206,7 @@ logger.info('Cafe search reply sent', {
 });
 ```
 
-這些 log 不是為了把 Cloud Logging 填滿，而是讓下一次有人說「Bot 沒反應」時，可以快速回答幾個具體問題：
-
-- LINE event 有沒有到
-- Maps Grounding 有沒有開始
-- 模型花了多久
-- 回了幾個來源
-- Push Message 是否成功
-
-只要沿著同一個 `webhookEventId` 往下看，就能知道事件停在哪一站。這比盯著一排 200 猜測有效太多。
+這些 log 不是為了把 Cloud Logging 填滿，而是讓我們沿著同一個 `webhookEventId` 看出事件有沒有抵達、搜尋花了多久，以及 Push Message 是否成功。這比盯著一排 200 猜測有效太多。
 
 ---
 
@@ -288,20 +236,7 @@ Part 1 已經做過 typecheck、單元測試、本機啟動與 `/health` smoke t
 
 ## 🏆 第四篇實戰總結
 
-這次從部署到修復，Codex 做的不只是提供幾條指令，而是跟著問題一路往下查：
-
-- 啟動 Google 登入
-- 發現錯誤帳號
-- 驗證 project IAM
-- 啟用缺少的 API
-- 設定 ADC quota project
-- 建立 runtime service account
-- 部署 Cloud Run
-- 更新 LINE webhook
-- 讀 request logs 與 application logs
-- 從 200 response 找到非同步生命週期問題
-- 修改 Loading Animation 與 Push Message
-- 重新測試、部署、提交
+這次從登入、權限、部署到 webhook 除錯，Codex 做的不只是提供幾條指令，而是跟著問題一路往下查：先確認眼前的錯誤究竟發生在哪一層，再修改、驗證，直到手機真的收到結果。
 
 回頭看，真正花時間的不是某一行 TypeScript，而是在每個看似合理的地方繼續問：「這真的能證明下一步也成功嗎？」
 
